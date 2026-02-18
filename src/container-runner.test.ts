@@ -8,11 +8,12 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+  AGENT_RUNNER_DIR: '/tmp/nanoclaw-test-agent-runner',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+  GUIX_MANIFEST_PATH: '/tmp/nanoclaw-test/container/manifest.scm',
   IDLE_TIMEOUT: 1800000, // 30min
 }));
 
@@ -40,6 +41,7 @@ vi.mock('fs', async () => {
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
+      unlinkSync: vi.fn(),
     },
   };
 });
@@ -56,12 +58,14 @@ function createFakeProcess() {
     stdout: PassThrough;
     stderr: PassThrough;
     kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
     pid: number;
   };
   proc.stdin = new PassThrough();
   proc.stdout = new PassThrough();
   proc.stderr = new PassThrough();
   proc.kill = vi.fn();
+  proc.killed = false;
   proc.pid = 12345;
   return proc;
 }
@@ -74,10 +78,6 @@ vi.mock('child_process', async () => {
   return {
     ...actual,
     spawn: vi.fn(() => fakeProc),
-    exec: vi.fn((_cmd: string, _opts: unknown, cb?: (err: Error | null) => void) => {
-      if (cb) cb(null);
-      return new EventEmitter();
-    }),
   };
 });
 
@@ -135,7 +135,7 @@ describe('container-runner timeout behavior', () => {
     // Fire the hard timeout (IDLE_TIMEOUT + 30s = 1830000ms)
     await vi.advanceTimersByTimeAsync(1830000);
 
-    // Emit close event (as if container was stopped by the timeout)
+    // Emit close event (as if process was killed by the timeout)
     fakeProc.emit('close', 137);
 
     // Let the promise resolve
