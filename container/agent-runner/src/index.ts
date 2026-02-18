@@ -95,13 +95,38 @@ class MessageStream {
   }
 }
 
+const STDIN_DELIMITER = '\n---NANOCLAW_INPUT_END---\n';
+
+/**
+ * Read stdin until delimiter (not EOF).
+ * Stdin stays open as a liveness pipe — EOF means the parent died.
+ */
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('data', chunk => {
+      data += chunk;
+      const idx = data.indexOf(STDIN_DELIMITER);
+      if (idx !== -1) {
+        resolve(data.slice(0, idx));
+      }
+    });
+    // If parent closes stdin without delimiter, treat as input complete (backwards compat)
     process.stdin.on('end', () => resolve(data));
     process.stdin.on('error', reject);
+  });
+}
+
+/**
+ * Monitor stdin for EOF after initial input is read.
+ * Parent keeps stdin open; if it dies, the pipe breaks and we get EOF.
+ */
+function monitorParentLiveness(): void {
+  process.stdin.resume();
+  process.stdin.on('end', () => {
+    log('Parent stdin closed, exiting');
+    process.exit(0);
   });
 }
 
@@ -558,6 +583,7 @@ async function main(): Promise<void> {
     // Delete the temp file the entrypoint wrote — it contains secrets
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
+    monitorParentLiveness();
   } catch (err) {
     writeOutput({
       status: 'error',

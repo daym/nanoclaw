@@ -26,8 +26,6 @@ import { RegisteredGroup } from './types.js';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-const PIDS_DIR = path.join(DATA_DIR, 'pids');
-
 function getHomeDir(): string {
   const home = process.env.HOME || os.homedir();
   if (!home) {
@@ -216,19 +214,6 @@ function buildGuixArgs(mounts: VolumeMount[]): string[] {
   return args;
 }
 
-function writePidFile(label: string, pid: number): void {
-  fs.mkdirSync(PIDS_DIR, { recursive: true });
-  fs.writeFileSync(path.join(PIDS_DIR, `${label}.pid`), String(pid));
-}
-
-function deletePidFile(label: string): void {
-  try {
-    fs.unlinkSync(path.join(PIDS_DIR, `${label}.pid`));
-  } catch {
-    // already deleted
-  }
-}
-
 function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -238,81 +223,6 @@ function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
     } catch {
       // ignore
     }
-  }
-}
-
-/**
- * Kill stale PIDs from previous runs.
- * Called on startup to clean up orphaned guix shell processes.
- */
-export function cleanupOrphanedProcesses(): void {
-  try {
-    fs.mkdirSync(PIDS_DIR, { recursive: true });
-  } catch {
-    return;
-  }
-
-  let files: string[];
-  try {
-    files = fs.readdirSync(PIDS_DIR).filter((f) => f.endsWith('.pid'));
-  } catch {
-    return;
-  }
-
-  const orphans: string[] = [];
-  for (const file of files) {
-    const pidStr = fs.readFileSync(path.join(PIDS_DIR, file), 'utf-8').trim();
-    const pid = parseInt(pidStr, 10);
-    if (isNaN(pid)) {
-      fs.unlinkSync(path.join(PIDS_DIR, file));
-      continue;
-    }
-
-    try {
-      process.kill(pid, 0); // Check if alive
-      // Process is alive — kill the entire process group
-      killProcessGroup(pid, 'SIGTERM');
-      orphans.push(file.replace('.pid', ''));
-      setTimeout(() => {
-        try {
-          process.kill(pid, 0);
-          killProcessGroup(pid, 'SIGKILL');
-          setTimeout(() => {
-            try {
-              process.kill(pid, 0);
-            } catch {
-              try {
-                fs.unlinkSync(path.join(PIDS_DIR, file));
-              } catch {
-                // ignore
-              }
-            }
-          }, 2000);
-          return;
-        } catch {
-          // Already dead.
-        }
-        try {
-          fs.unlinkSync(path.join(PIDS_DIR, file));
-        } catch {
-          // ignore
-        }
-      }, 5000);
-    } catch {
-      // Process already dead — clean up stale PID file
-      try {
-        fs.unlinkSync(path.join(PIDS_DIR, file));
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  if (orphans.length > 0) {
-    logger.info(
-      { count: orphans.length, names: orphans },
-      'Killed orphaned agent processes',
-    );
   }
 }
 
@@ -365,10 +275,6 @@ export async function runContainerAgent(
       detached: true,
     });
 
-    if (container.pid) {
-      writePidFile(label, container.pid);
-    }
-
     onProcess(container, label);
 
     let stdout = '';
@@ -376,10 +282,11 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    // Pass secrets via stdin (never written to disk or mounted as files)
+    // Pass secrets via stdin (never written to disk or mounted as files).
+    // Stdin stays open as a liveness pipe — child detects parent death via EOF.
     input.secrets = readSecrets();
     container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
+    container.stdin.write('\n---NANOCLAW_INPUT_END---\n');
     // Remove secrets from input so they don't appear in logs
     delete input.secrets;
 
@@ -500,7 +407,6 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
-      deletePidFile(label);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -693,7 +599,6 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
-      deletePidFile(label);
       logger.error({ group: group.name, label, error: err }, 'Container spawn error');
       resolve({
         status: 'error',
