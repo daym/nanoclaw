@@ -5,6 +5,8 @@ import path from 'path';
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
 import { logger } from './logger.js';
 
+const KILL_GRACE_MS = 10_000;
+
 interface QueuedTask {
   id: string;
   groupJid: string;
@@ -336,22 +338,39 @@ export class GroupQueue {
     }
   }
 
-  async shutdown(_gracePeriodMs: number): Promise<void> {
+  async shutdown(gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 
-    // Count active containers but don't kill them — they'll finish on their own
-    // via idle timeout or container timeout. The --rm flag cleans them up on exit.
-    // This prevents WhatsApp reconnection restarts from killing working agents.
-    const activeContainers: string[] = [];
+    // Send SIGTERM to all active processes and wait for them to exit
+    const activeProcesses: { label: string; proc: ChildProcess }[] = [];
     for (const [jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
-        activeContainers.push(state.containerName);
+        activeProcesses.push({ label: state.containerName, proc: state.process });
+        state.process.kill('SIGTERM');
       }
     }
 
+    if (activeProcesses.length === 0) {
+      logger.info('GroupQueue shutting down (no active processes)');
+      return;
+    }
+
     logger.info(
-      { activeCount: this.activeCount, detachedContainers: activeContainers },
-      'GroupQueue shutting down (containers detached, not killed)',
+      { activeCount: activeProcesses.length, labels: activeProcesses.map((p) => p.label) },
+      'GroupQueue shutting down, sent SIGTERM to active processes',
     );
+
+    // Wait for grace period, then SIGKILL any remaining
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        for (const { label, proc } of activeProcesses) {
+          if (!proc.killed) {
+            logger.warn({ label }, 'Process did not exit in time, sending SIGKILL');
+            proc.kill('SIGKILL');
+          }
+        }
+        resolve();
+      }, Math.min(gracePeriodMs, KILL_GRACE_MS));
+    });
   }
 }

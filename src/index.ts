@@ -10,15 +10,12 @@ import {
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
+  cleanupOrphanedProcesses,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import {
-  cleanupOrphans,
-  ensureContainerRuntimeRunning,
-} from './container-runtime.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -440,13 +437,8 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
-}
-
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  cleanupOrphanedProcesses();
   initDatabase();
   logger.info('Database initialized');
   loadState();

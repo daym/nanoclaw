@@ -1,34 +1,42 @@
 /**
  * Container Runner for NanoClaw
- * Spawns agent execution in containers and handles IPC
+ * Spawns agent execution in guix shell -C and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
-  CONTAINER_IMAGE,
+  AGENT_RUNNER_DIR,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
+  GUIX_MANIFEST_PATH,
   IDLE_TIMEOUT,
-  TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import {
-  CONTAINER_RUNTIME_BIN,
-  readonlyMountArgs,
-  stopContainer,
-} from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+const PIDS_DIR = path.join(DATA_DIR, 'pids');
+
+function getHomeDir(): string {
+  const home = process.env.HOME || os.homedir();
+  if (!home) {
+    throw new Error(
+      'Unable to determine home directory: HOME environment variable is not set and os.homedir() returned empty',
+    );
+  }
+  return home;
+}
 
 export interface ContainerInput {
   prompt: string;
@@ -89,7 +97,6 @@ function buildVolumeMounts(
     });
 
     // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
@@ -146,7 +153,7 @@ function buildVolumeMounts(
   }
   mounts.push({
     hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
+    containerPath: path.join(getHomeDir(), '.claude'),
     readonly: false,
   });
 
@@ -162,28 +169,11 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(
-    projectRoot,
-    'container',
-    'agent-runner',
-    'src',
-  );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-  }
+  // Mount pre-compiled agent-runner (compiled on host via build.sh)
   mounts.push({
-    hostPath: groupAgentRunnerDir,
-    containerPath: '/app/src',
-    readonly: false,
+    hostPath: AGENT_RUNNER_DIR,
+    containerPath: '/app',
+    readonly: true,
   });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
@@ -207,42 +197,92 @@ function readSecrets(): Record<string, string> {
   return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
 }
 
-function buildContainerArgs(
-  mounts: VolumeMount[],
-  containerName: string,
-): string[] {
-  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
-
-  // Pass host timezone so container's local time matches the user's
-  args.push('-e', `TZ=${TIMEZONE}`);
-
-  // Run as host user so bind-mounted files are accessible.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
-  const hostUid = process.getuid?.();
-  const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/home/node');
-  }
+function buildGuixArgs(mounts: VolumeMount[]): string[] {
+  const args: string[] = [
+    'shell', '-C', '--pure', '--network', '--no-cwd',
+    `--manifest=${GUIX_MANIFEST_PATH}`,
+  ];
 
   for (const mount of mounts) {
     if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
+      args.push(`--expose=${mount.hostPath}=${mount.containerPath}`);
     } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+      args.push(`--share=${mount.hostPath}=${mount.containerPath}`);
     }
   }
 
-  args.push(CONTAINER_IMAGE);
+  args.push('--', 'node', '/app/dist/index.js');
 
   return args;
+}
+
+function writePidFile(label: string, pid: number): void {
+  fs.mkdirSync(PIDS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(PIDS_DIR, `${label}.pid`), String(pid));
+}
+
+function deletePidFile(label: string): void {
+  try {
+    fs.unlinkSync(path.join(PIDS_DIR, `${label}.pid`));
+  } catch {
+    // already deleted
+  }
+}
+
+/**
+ * Kill stale PIDs from previous runs.
+ * Called on startup to clean up orphaned guix shell processes.
+ */
+export function cleanupOrphanedProcesses(): void {
+  try {
+    fs.mkdirSync(PIDS_DIR, { recursive: true });
+  } catch {
+    return;
+  }
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(PIDS_DIR).filter((f) => f.endsWith('.pid'));
+  } catch {
+    return;
+  }
+
+  const orphans: string[] = [];
+  for (const file of files) {
+    const pidStr = fs.readFileSync(path.join(PIDS_DIR, file), 'utf-8').trim();
+    const pid = parseInt(pidStr, 10);
+    if (isNaN(pid)) {
+      fs.unlinkSync(path.join(PIDS_DIR, file));
+      continue;
+    }
+
+    try {
+      process.kill(pid, 0); // Check if alive
+      // Process is alive — kill it
+      process.kill(pid, 'SIGTERM');
+      orphans.push(file.replace('.pid', ''));
+    } catch {
+      // Process already dead — clean up stale PID file
+    }
+    try {
+      fs.unlinkSync(path.join(PIDS_DIR, file));
+    } catch {
+      // ignore
+    }
+  }
+
+  if (orphans.length > 0) {
+    logger.info(
+      { count: orphans.length, names: orphans },
+      'Killed orphaned agent processes',
+    );
+  }
 }
 
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, containerName: string) => void,
+  onProcess: (proc: ChildProcess, label: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
@@ -252,18 +292,18 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const label = `nanoclaw-${safeName}-${Date.now()}`;
+  const guixArgs = buildGuixArgs(mounts);
 
   logger.debug(
     {
       group: group.name,
-      containerName,
+      label,
       mounts: mounts.map(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
       ),
-      containerArgs: containerArgs.join(' '),
+      guixArgs: guixArgs.join(' '),
     },
     'Container mount configuration',
   );
@@ -271,7 +311,7 @@ export async function runContainerAgent(
   logger.info(
     {
       group: group.name,
-      containerName,
+      label,
       mountCount: mounts.length,
       isMain: input.isMain,
     },
@@ -282,11 +322,15 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+    const container = spawn('guix', guixArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    onProcess(container, containerName);
+    if (container.pid) {
+      writePidFile(label, container.pid);
+    }
+
+    onProcess(container, label);
 
     let stdout = '';
     let stderr = '';
@@ -388,19 +432,15 @@ export async function runContainerAgent(
 
     const killOnTimeout = () => {
       timedOut = true;
-      logger.error(
-        { group: group.name, containerName },
-        'Container timeout, stopping gracefully',
-      );
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn(
-            { group: group.name, containerName, err },
-            'Graceful stop failed, force killing',
-          );
+      logger.error({ group: group.name, label }, 'Container timeout, sending SIGTERM');
+      container.kill('SIGTERM');
+      // Fallback to SIGKILL after 15s grace period
+      setTimeout(() => {
+        if (!container.killed) {
+          logger.warn({ group: group.name, label }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');
         }
-      });
+      }, 15000);
     };
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);
@@ -413,30 +453,28 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      deletePidFile(label);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(
-          timeoutLog,
-          [
-            `=== Container Run Log (TIMEOUT) ===`,
-            `Timestamp: ${new Date().toISOString()}`,
-            `Group: ${group.name}`,
-            `Container: ${containerName}`,
-            `Duration: ${duration}ms`,
-            `Exit Code: ${code}`,
-            `Had Streaming Output: ${hadStreamingOutput}`,
-          ].join('\n'),
-        );
+        fs.writeFileSync(timeoutLog, [
+          `=== Container Run Log (TIMEOUT) ===`,
+          `Timestamp: ${new Date().toISOString()}`,
+          `Group: ${group.name}`,
+          `Label: ${label}`,
+          `Duration: ${duration}ms`,
+          `Exit Code: ${code}`,
+          `Had Streaming Output: ${hadStreamingOutput}`,
+        ].join('\n'));
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
-        // container being reaped after the idle period expired.
+        // process being reaped after the idle period expired.
         if (hadStreamingOutput) {
           logger.info(
-            { group: group.name, containerName, duration, code },
+            { group: group.name, label, duration, code },
             'Container timed out after output (idle cleanup)',
           );
           outputChain.then(() => {
@@ -450,7 +488,7 @@ export async function runContainerAgent(
         }
 
         logger.error(
-          { group: group.name, containerName, duration, code },
+          { group: group.name, label, duration, code },
           'Container timed out with no output',
         );
 
@@ -486,8 +524,8 @@ export async function runContainerAgent(
           `=== Input ===`,
           JSON.stringify(input, null, 2),
           ``,
-          `=== Container Args ===`,
-          containerArgs.join(' '),
+          `=== Guix Args ===`,
+          guixArgs.join(' '),
           ``,
           `=== Mounts ===`,
           mounts
@@ -608,10 +646,8 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
-      logger.error(
-        { group: group.name, containerName, error: err },
-        'Container spawn error',
-      );
+      deletePidFile(label);
+      logger.error({ group: group.name, label, error: err }, 'Container spawn error');
       resolve({
         status: 'error',
         result: null,

@@ -118,6 +118,17 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
+function safeJson(value: unknown, maxLen: number): string {
+  try {
+    const text = JSON.stringify(value);
+    if (!text) return '';
+    if (text.length <= maxLen) return text;
+    return `${text.slice(0, maxLen)}...<truncated>`;
+  } catch {
+    return String(value);
+  }
+}
+
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
   const projectDir = path.dirname(transcriptPath);
   const indexPath = path.join(projectDir, 'sessions-index.json');
@@ -507,6 +518,7 @@ async function main(): Promise<void> {
     });
     process.exit(1);
   }
+
 
   // Build SDK env: merge secrets into process.env for the SDK only.
   // Secrets never touch process.env itself, so Bash subprocesses can't see them.
