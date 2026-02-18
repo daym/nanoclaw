@@ -353,16 +353,12 @@ export class GroupQueue {
   async shutdown(gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 
-    // Send SIGTERM to all active processes and wait for them to exit
+    // Close stdin on all active processes to trigger graceful exit
     const activeProcesses: { label: string; proc: ChildProcess }[] = [];
     for (const [jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
         activeProcesses.push({ label: state.containerName, proc: state.process });
-        if (!state.process.pid) {
-          logger.error({ label: state.containerName }, 'Process has no pid, cannot send SIGTERM');
-        } else {
-          killProcessGroup(state.process.pid, 'SIGTERM');
-        }
+        state.process.stdin?.destroy();
       }
     }
 
@@ -373,14 +369,14 @@ export class GroupQueue {
 
     logger.info(
       { activeCount: activeProcesses.length, labels: activeProcesses.map((p) => p.label) },
-      'GroupQueue shutting down, sent SIGTERM to active processes',
+      'GroupQueue shutting down, closed stdin on active processes',
     );
 
-    // Wait for grace period, then SIGKILL any remaining
+    // Wait for grace period, then SIGKILL any that haven't been reaped
     await new Promise<void>((resolve) => {
       setTimeout(() => {
         for (const { label, proc } of activeProcesses) {
-          if (!proc.killed) {
+          if (proc.exitCode === null && proc.signalCode === null) {
             logger.warn({ label }, 'Process did not exit in time, sending SIGKILL');
             if (!proc.pid) {
               logger.error({ label }, 'Process has no pid, cannot send SIGKILL');

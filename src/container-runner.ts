@@ -376,23 +376,19 @@ export async function runContainerAgent(
     // graceful _close sentinel has time to trigger before the hard kill fires.
     const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
 
+    let killFallbackTimeout: ReturnType<typeof setTimeout> | null = null;
+
     const killOnTimeout = () => {
       timedOut = true;
-      logger.error({ group: group.name, label }, 'Container timeout, sending SIGTERM');
-      if (!container.pid) {
-        logger.error({ group: group.name, label }, 'Container has no pid, cannot send SIGTERM');
-      } else {
-        killProcessGroup(container.pid, 'SIGTERM');
-      }
-      // Fallback to SIGKILL after 15s grace period
-      setTimeout(() => {
-        if (!container.killed) {
-          logger.warn({ group: group.name, label }, 'Graceful stop failed, force killing');
-          if (!container.pid) {
-            logger.error({ group: group.name, label }, 'Container has no pid, cannot send SIGKILL');
-          } else {
-            killProcessGroup(container.pid, 'SIGKILL');
-          }
+      logger.error({ group: group.name, label }, 'Container timeout, closing stdin');
+      container.stdin.destroy();
+      // Fallback to SIGKILL after 15s if the process hasn't exited
+      killFallbackTimeout = setTimeout(() => {
+        logger.warn({ group: group.name, label }, 'Graceful stop failed, force killing');
+        if (!container.pid) {
+          logger.error({ group: group.name, label }, 'Container has no pid, cannot send SIGKILL');
+        } else {
+          killProcessGroup(container.pid, 'SIGKILL');
         }
       }, 15000);
     };
@@ -407,6 +403,7 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      if (killFallbackTimeout) clearTimeout(killFallbackTimeout);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
