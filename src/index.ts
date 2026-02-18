@@ -11,7 +11,6 @@ import {
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
-  cleanupOrphanedProcesses,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -388,7 +387,6 @@ function recoverPendingMessages(): void {
 
 
 async function main(): Promise<void> {
-  cleanupOrphanedProcesses();
   initDatabase();
   logger.info('Database initialized');
   loadState();
