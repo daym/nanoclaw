@@ -114,8 +114,10 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_END_MARKER);
 }
 
+const LOG_PREFIX = `[agent-runner pid=${process.pid}]`;
+
 function log(message: string): void {
-  console.error(`[agent-runner] ${message}`);
+  console.error(`${LOG_PREFIX} ${message}`);
 }
 
 function safeJson(value: unknown, maxLen: number): string {
@@ -127,6 +129,39 @@ function safeJson(value: unknown, maxLen: number): string {
   } catch {
     return String(value);
   }
+}
+
+function formatError(label: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!err || typeof err !== 'object') return `${label}: ${message}`;
+  const anyErr = err as {
+    name?: string;
+    message?: string;
+    code?: string;
+    type?: string;
+    subtype?: string;
+    status?: number;
+    statusCode?: number;
+    response?: { status?: number; headers?: Record<string, unknown>; data?: unknown };
+    cause?: unknown;
+  };
+  const details = {
+    name: anyErr.name,
+    message: anyErr.message,
+    code: anyErr.code,
+    type: anyErr.type,
+    subtype: anyErr.subtype,
+    status: anyErr.status,
+    statusCode: anyErr.statusCode,
+    responseStatus: anyErr.response?.status,
+    responseHeaders: anyErr.response?.headers,
+    responseData: anyErr.response?.data,
+    cause: anyErr.cause instanceof Error
+      ? { name: anyErr.cause.name, message: anyErr.cause.message }
+      : anyErr.cause,
+  };
+  const text = safeJson(details, 4000);
+  return text ? `${label}: ${message} — ${text}` : `${label}: ${message}`;
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -344,14 +379,18 @@ function drainIpcInput(): string[] {
 function waitForIpcMessage(): Promise<string | null> {
   return new Promise((resolve) => {
     const poll = () => {
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
-        return;
+      try {
+        if (shouldClose()) {
+          resolve(null);
+          return;
+        }
+        const messages = drainIpcInput();
+        if (messages.length > 0) {
+          resolve(messages.join('\n'));
+          return;
+        }
+      } catch (err) {
+        log(`IPC wait poll error: ${err instanceof Error ? err.message : String(err)}`);
       }
       setTimeout(poll, IPC_POLL_MS);
     };
@@ -381,17 +420,21 @@ async function runQuery(
   let closedDuringQuery = false;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
-    if (shouldClose()) {
-      log('Close sentinel detected during query, ending stream');
-      closedDuringQuery = true;
-      stream.end();
-      ipcPolling = false;
-      return;
-    }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    try {
+      if (shouldClose()) {
+        log('Close sentinel detected during query, ending stream');
+        closedDuringQuery = true;
+        stream.end();
+        ipcPolling = false;
+        return;
+      }
+      const messages = drainIpcInput();
+      for (const text of messages) {
+        log(`Piping IPC message into active query (${text.length} chars)`);
+        stream.push(text);
+      }
+    } catch (err) {
+      log(`IPC poll error: ${err instanceof Error ? err.message : String(err)}`);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -425,75 +468,80 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
-    prompt: stream,
-    options: {
-      cwd: '/workspace/group',
-      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
-      resume: sessionId,
-      resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-        : undefined,
-      allowedTools: [
-        'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*'
-      ],
-      env: sdkEnv,
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+  try {
+    for await (const message of query({
+      prompt: stream,
+      options: {
+        cwd: '/workspace/group',
+        additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+        resume: sessionId,
+        resumeSessionAt: resumeAt,
+        systemPrompt: globalClaudeMd
+          ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
+          : undefined,
+        allowedTools: [
+          'Bash',
+          'Read', 'Write', 'Edit', 'Glob', 'Grep',
+          'WebSearch', 'WebFetch',
+          'Task', 'TaskOutput', 'TaskStop',
+          'TeamCreate', 'TeamDelete', 'SendMessage',
+          'TodoWrite', 'ToolSearch', 'Skill',
+          'NotebookEdit',
+          'mcp__nanoclaw__*'
+        ],
+        env: sdkEnv,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        settingSources: ['project', 'user'],
+        mcpServers: {
+          nanoclaw: {
+            command: 'node',
+            args: [mcpServerPath],
+            env: {
+              NANOCLAW_CHAT_JID: containerInput.chatJid,
+              NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+              NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            },
           },
         },
-      },
-      hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
-      },
-    }
-  })) {
-    messageCount++;
-    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+        hooks: {
+          PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+          PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
+        },
+      }
+    })) {
+      messageCount++;
+      const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
+      log(`[msg #${messageCount}] type=${msgType}`);
 
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
-    }
+      if (message.type === 'assistant' && 'uuid' in message) {
+        lastAssistantUuid = (message as { uuid: string }).uuid;
+      }
 
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
-    }
+      if (message.type === 'system' && message.subtype === 'init') {
+        newSessionId = message.session_id;
+        log(`Session initialized: ${newSessionId}`);
+      }
 
-    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-      const tn = message as { task_id: string; status: string; summary: string };
-      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
-    }
+      if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
+        const tn = message as { task_id: string; status: string; summary: string };
+        log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+      }
 
-    if (message.type === 'result') {
-      resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId
-      });
+      if (message.type === 'result') {
+        resultCount++;
+        const textResult = 'result' in message ? (message as { result?: string }).result : null;
+        log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+        writeOutput({
+          status: 'success',
+          result: textResult || null,
+          newSessionId
+        });
+      }
     }
+  } catch (err) {
+    log(formatError('Query error', err));
+    throw err;
   }
 
   ipcPolling = false;
@@ -519,6 +567,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  process.on('uncaughtException', (err) => {
+    log(formatError('Uncaught exception', err));
+    setTimeout(() => process.exit(1), 1000);
+  });
+  process.on('unhandledRejection', (err) => {
+    log(formatError('Unhandled rejection', err));
+  });
 
   // Build SDK env: merge secrets into process.env for the SDK only.
   // Secrets never touch process.env itself, so Bash subprocesses can't see them.
@@ -586,7 +641,7 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    log(`Agent error: ${errorMessage}`);
+    log(formatError('Agent error', err));
     writeOutput({
       status: 'error',
       result: null,

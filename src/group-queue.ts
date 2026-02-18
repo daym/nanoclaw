@@ -7,6 +7,18 @@ import { logger } from './logger.js';
 
 const KILL_GRACE_MS = 10_000;
 
+function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 interface QueuedTask {
   id: string;
   groupJid: string;
@@ -346,7 +358,11 @@ export class GroupQueue {
     for (const [jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
         activeProcesses.push({ label: state.containerName, proc: state.process });
-        state.process.kill('SIGTERM');
+        if (!state.process.pid) {
+          logger.error({ label: state.containerName }, 'Process has no pid, cannot send SIGTERM');
+        } else {
+          killProcessGroup(state.process.pid, 'SIGTERM');
+        }
       }
     }
 
@@ -366,7 +382,11 @@ export class GroupQueue {
         for (const { label, proc } of activeProcesses) {
           if (!proc.killed) {
             logger.warn({ label }, 'Process did not exit in time, sending SIGKILL');
-            proc.kill('SIGKILL');
+            if (!proc.pid) {
+              logger.error({ label }, 'Process has no pid, cannot send SIGKILL');
+            } else {
+              killProcessGroup(proc.pid, 'SIGKILL');
+            }
           }
         }
         resolve();

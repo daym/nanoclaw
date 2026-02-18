@@ -229,6 +229,18 @@ function deletePidFile(label: string): void {
   }
 }
 
+function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /**
  * Kill stale PIDs from previous runs.
  * Called on startup to clean up orphaned guix shell processes.
@@ -258,16 +270,41 @@ export function cleanupOrphanedProcesses(): void {
 
     try {
       process.kill(pid, 0); // Check if alive
-      // Process is alive — kill it
-      process.kill(pid, 'SIGTERM');
+      // Process is alive — kill the entire process group
+      killProcessGroup(pid, 'SIGTERM');
       orphans.push(file.replace('.pid', ''));
+      setTimeout(() => {
+        try {
+          process.kill(pid, 0);
+          killProcessGroup(pid, 'SIGKILL');
+          setTimeout(() => {
+            try {
+              process.kill(pid, 0);
+            } catch {
+              try {
+                fs.unlinkSync(path.join(PIDS_DIR, file));
+              } catch {
+                // ignore
+              }
+            }
+          }, 2000);
+          return;
+        } catch {
+          // Already dead.
+        }
+        try {
+          fs.unlinkSync(path.join(PIDS_DIR, file));
+        } catch {
+          // ignore
+        }
+      }, 5000);
     } catch {
       // Process already dead — clean up stale PID file
-    }
-    try {
-      fs.unlinkSync(path.join(PIDS_DIR, file));
-    } catch {
-      // ignore
+      try {
+        fs.unlinkSync(path.join(PIDS_DIR, file));
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -324,6 +361,8 @@ export async function runContainerAgent(
   return new Promise((resolve) => {
     const container = spawn('guix', guixArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Start a new process group so we can kill the whole container tree.
+      detached: true,
     });
 
     if (container.pid) {
@@ -433,12 +472,20 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, label }, 'Container timeout, sending SIGTERM');
-      container.kill('SIGTERM');
+      if (!container.pid) {
+        logger.error({ group: group.name, label }, 'Container has no pid, cannot send SIGTERM');
+      } else {
+        killProcessGroup(container.pid, 'SIGTERM');
+      }
       // Fallback to SIGKILL after 15s grace period
       setTimeout(() => {
         if (!container.killed) {
           logger.warn({ group: group.name, label }, 'Graceful stop failed, force killing');
-          container.kill('SIGKILL');
+          if (!container.pid) {
+            logger.error({ group: group.name, label }, 'Container has no pid, cannot send SIGKILL');
+          } else {
+            killProcessGroup(container.pid, 'SIGKILL');
+          }
         }
       }, 15000);
     };
