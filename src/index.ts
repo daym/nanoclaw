@@ -174,6 +174,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await whatsapp.sendMessage(chatJid, text);
+        await whatsapp.setTyping(chatJid, false);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
