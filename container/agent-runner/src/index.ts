@@ -12,6 +12,49 @@
  *   Each result is wrapped in OUTPUT_START_MARKER / OUTPUT_END_MARKER pairs.
  *   Multiple results may be emitted (one per agent teams result).
  *   Final marker after loop ends signals completion.
+ *
+ * HOW THE AGENT SDK RUNS INSIDE THE GUIX CONTAINER:
+ *
+ *   The @anthropic-ai/claude-agent-sdk package contains two key files:
+ *     - sdk.mjs (377KB): the SDK API (query(), hooks, etc.) — what we import
+ *     - cli.js (11MB): a full minified bundle of the entire Claude Code application
+ *
+ *   The query() call does NOT spawn the "claude" binary from the Guix
+ *   claude-code package. Instead, when pathToClaudeCodeExecutable is not set
+ *   (we don't set it), sdk.mjs defaults to spawning `node cli.js` from its
+ *   own package directory (see sdk.mjs: `oz(oz(gI(import.meta.url),".."), "cli.js")`).
+ *
+ *   cli.js is the same code as the standalone claude ELF binary (228MB), just
+ *   without the Node.js runtime embedded. The SDK ships this bundled copy so
+ *   it doesn't need the claude binary installed separately.
+ *
+ *   So the execution chain is:
+ *     guix shell -C --pure ... -- node /app/dist/index.js   (this file)
+ *       -> query() in @anthropic-ai/claude-agent-sdk/sdk.mjs
+ *         -> spawns: node @anthropic-ai/claude-agent-sdk/cli.js
+ *           -> cli.js IS Claude Code (full bundle), all tools run inside it
+ *
+ *   BASH TOOL SHELL DETECTION (in cli.js):
+ *     cli.js needs a shell to run Bash tool commands. It searches in order:
+ *       1. CLAUDE_CODE_SHELL env var (must contain "bash" or "zsh", must be executable)
+ *       2. $SHELL env var (must contain "bash" or "zsh")
+ *       3. `which zsh` and `which bash` (async PATH lookup)
+ *       4. Hardcoded paths: /bin/bash, /usr/bin/bash, /usr/local/bin/bash,
+ *          /opt/homebrew/bin/bash (same for zsh)
+ *     If none found: "No suitable shell found" error, Bash tool fails.
+ *
+ *   IN THE GUIX CONTAINER (guix shell -C --pure):
+ *     - $SHELL is NOT set (--pure strips it)
+ *     - `which` is NOT in the manifest, so step 3 fails with "command not found"
+ *     - bash lives at /gnu/store/...-bash-5.x/bin/bash, not at /bin/bash
+ *     - /bin/sh exists (symlink to Guix bash) but cli.js never checks /bin/sh
+ *     -> All steps fail, Bash tool is broken.
+ *
+ *   FIX: Either set CLAUDE_CODE_SHELL to point to the Guix bash path, or
+ *   add the `which` package to container/manifest.scm so the PATH lookup works.
+ *
+ *   NOTE: The "claude-code" package in manifest.scm is currently unused.
+ *   The SDK runs cli.js directly, not the claude binary.
  */
 
 import fs from 'fs';
