@@ -197,7 +197,11 @@ function readSecrets(): Record<string, string> {
 
 function buildGuixArgs(mounts: VolumeMount[]): string[] {
   const args: string[] = [
-    'shell', '-C', '--pure', '--network', '--no-cwd',
+    'shell',
+    '-C',
+    '--pure',
+    '--network',
+    '--no-cwd',
     `--manifest=${GUIX_MANIFEST_PATH}`,
   ];
 
@@ -336,9 +340,14 @@ export async function runContainerAgent(
             resetTimeout();
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed)).catch((err) => {
-              logger.error({ group: group.name, error: err }, 'Error in streaming output callback');
-            });
+            outputChain = outputChain
+              .then(() => onOutput(parsed))
+              .catch((err) => {
+                logger.error(
+                  { group: group.name, error: err },
+                  'Error in streaming output callback',
+                );
+              });
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },
@@ -382,13 +391,22 @@ export async function runContainerAgent(
 
     const killOnTimeout = () => {
       timedOut = true;
-      logger.error({ group: group.name, label }, 'Container timeout, closing stdin');
+      logger.error(
+        { group: group.name, label },
+        'Container timeout, closing stdin',
+      );
       container.stdin.destroy();
       // Fallback to SIGKILL after 15s if the process hasn't exited
       killFallbackTimeout = setTimeout(() => {
-        logger.warn({ group: group.name, label }, 'Graceful stop failed, force killing');
+        logger.warn(
+          { group: group.name, label },
+          'Graceful stop failed, force killing',
+        );
         if (!container.pid) {
-          logger.error({ group: group.name, label }, 'Container has no pid, cannot send SIGKILL');
+          logger.error(
+            { group: group.name, label },
+            'Container has no pid, cannot send SIGKILL',
+          );
         } else {
           killProcessGroup(container.pid, 'SIGKILL');
         }
@@ -411,15 +429,18 @@ export async function runContainerAgent(
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(timeoutLog, [
-          `=== Container Run Log (TIMEOUT) ===`,
-          `Timestamp: ${new Date().toISOString()}`,
-          `Group: ${group.name}`,
-          `Label: ${label}`,
-          `Duration: ${duration}ms`,
-          `Exit Code: ${code}`,
-          `Had Streaming Output: ${hadStreamingOutput}`,
-        ].join('\n'));
+        fs.writeFileSync(
+          timeoutLog,
+          [
+            `=== Container Run Log (TIMEOUT) ===`,
+            `Timestamp: ${new Date().toISOString()}`,
+            `Group: ${group.name}`,
+            `Label: ${label}`,
+            `Duration: ${duration}ms`,
+            `Exit Code: ${code}`,
+            `Had Streaming Output: ${hadStreamingOutput}`,
+          ].join('\n'),
+        );
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
@@ -598,7 +619,10 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
-      logger.error({ group: group.name, label, error: err }, 'Container spawn error');
+      logger.error(
+        { group: group.name, label, error: err },
+        'Container spawn error',
+      );
       resolve({
         status: 'error',
         result: null,
