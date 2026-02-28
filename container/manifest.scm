@@ -138,16 +138,19 @@ JavaScript.")
           node-cron-parser)
     (map specification->package
       '("node"
-        "claude-code"
         "node-anthropic-ai-claude-agent-sdk"
         "node-modelcontextprotocol-sdk"
         "node-zod"
         ;; "agent-browser"  ; TODO: package for Guix
         ;; "ungoogled-chromium"  ; TODO: takes forever to build
         "git"
+        "sed"
+        "gzip"
+        "tar"
         "curl"
         "bash"
         "coreutils"
         "nss-certs"
         "font-liberation"
-        "fontconfig"))))
+        "fontconfig"
+        "which")))) ; claude code (in node-anthropic-ai-claude-agent-sdk) uses "which bash" to find bash
