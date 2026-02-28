@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 
 // Mock config so TRIGGER_PATTERN uses 'Andy' regardless of .env
 vi.mock('./config.js', async () => {
-  const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
+  const actual =
+    await vi.importActual<typeof import('./config.js')>('./config.js');
   return {
     ...actual,
     ASSISTANT_NAME: 'Andy',
