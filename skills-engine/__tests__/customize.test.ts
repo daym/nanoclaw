@@ -1,6 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
+});
 import {
   isCustomizeActive,
   startCustomize,
@@ -119,17 +125,16 @@ describe('customize', () => {
     // Modify the tracked file
     fs.writeFileSync(trackedFile, 'export const x = 2;');
 
-    // Make the base file a directory to cause diff to exit with code 2
-    const baseFilePath = path.join(
-      tmpDir,
-      '.nanoclaw',
-      'base',
-      'src',
-      'app.ts',
-    );
-    fs.mkdirSync(baseFilePath, { recursive: true });
+    // Mock execFileSync to simulate diff exiting with status 2
+    vi.mocked(execFileSync).mockImplementation(() => {
+      const err = new Error('diff failed') as Error & { status: number };
+      err.status = 2;
+      throw err;
+    });
 
     expect(() => commitCustomize()).toThrow(/diff error/i);
+
+    vi.mocked(execFileSync).mockRestore();
   });
 
   it('startCustomize while active throws', () => {
