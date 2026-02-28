@@ -357,7 +357,10 @@ export class GroupQueue {
     const activeProcesses: { label: string; proc: ChildProcess }[] = [];
     for (const [jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
-        activeProcesses.push({ label: state.containerName, proc: state.process });
+        activeProcesses.push({
+          label: state.containerName,
+          proc: state.process,
+        });
         state.process.stdin?.destroy();
       }
     }
@@ -368,25 +371,37 @@ export class GroupQueue {
     }
 
     logger.info(
-      { activeCount: activeProcesses.length, labels: activeProcesses.map((p) => p.label) },
+      {
+        activeCount: activeProcesses.length,
+        labels: activeProcesses.map((p) => p.label),
+      },
       'GroupQueue shutting down, closed stdin on active processes',
     );
 
     // Wait for grace period, then SIGKILL any that haven't been reaped
     await new Promise<void>((resolve) => {
-      setTimeout(() => {
-        for (const { label, proc } of activeProcesses) {
-          if (proc.exitCode === null && proc.signalCode === null) {
-            logger.warn({ label }, 'Process did not exit in time, sending SIGKILL');
-            if (!proc.pid) {
-              logger.error({ label }, 'Process has no pid, cannot send SIGKILL');
-            } else {
-              killProcessGroup(proc.pid, 'SIGKILL');
+      setTimeout(
+        () => {
+          for (const { label, proc } of activeProcesses) {
+            if (proc.exitCode === null && proc.signalCode === null) {
+              logger.warn(
+                { label },
+                'Process did not exit in time, sending SIGKILL',
+              );
+              if (!proc.pid) {
+                logger.error(
+                  { label },
+                  'Process has no pid, cannot send SIGKILL',
+                );
+              } else {
+                killProcessGroup(proc.pid, 'SIGKILL');
+              }
             }
           }
-        }
-        resolve();
-      }, Math.min(gracePeriodMs, KILL_GRACE_MS));
+          resolve();
+        },
+        Math.min(gracePeriodMs, KILL_GRACE_MS),
+      );
     });
   }
 }
