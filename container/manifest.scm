@@ -139,17 +139,19 @@ JavaScript.")
     (map specification->package
       '("node"
         "node-anthropic-ai-claude-agent-sdk"
-        "node-modelcontextprotocol-sdk"
         "node-zod"
         ;; "agent-browser"  ; TODO: package for Guix
         ;; "ungoogled-chromium"  ; TODO: takes forever to build
         "git"
+        "grep"
+        "procps"
         "sed"
         "gzip"
         "tar"
         "curl"
         "bash"
         "coreutils"
+        "diffutils"
         "nss-certs"
         "font-liberation"
         "fontconfig"
